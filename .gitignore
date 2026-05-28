@@ -1,0 +1,16 @@
+bin/
+*.exe
+*.test
+*.out
+*.log
+
+# Never commit real credentials
+config.json
+config.local.json
+.env
+.env.local
+
+# Local-only cache (per-device, not for source control)
+local.db
+local.db-wal
+local.db-shm

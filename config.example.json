@@ -1,0 +1,18 @@
+{
+  "db": {
+    "connectionString": "postgres://memory_mcp_user:REPLACE_WITH_SETUP_OUTPUT@aws-0-REGION.pooler.supabase.com:6543/postgres?sslmode=verify-full",
+    "caCertPath": null
+  },
+  "device": {
+    "id": "REPLACE_WITH_UUID_FROM_SETUP"
+  },
+  "project": {
+    "slug": null,
+    "name": null
+  },
+  "sync": {
+    "intervalSeconds": 60,
+    "pageSize": 1000,
+    "localDbPath": null
+  }
+}
