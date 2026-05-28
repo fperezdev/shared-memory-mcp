@@ -10,8 +10,7 @@ config.local.json
 .env
 .env.local
 
-# Portable-mode runtime state (per-device, not for source control)
-data/
+# Local cache (per-device, lives in %LOCALAPPDATA% / ~/.local/share — never in the repo)
 local.db
 local.db-wal
 local.db-shm

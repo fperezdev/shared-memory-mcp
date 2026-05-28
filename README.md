@@ -75,31 +75,27 @@ The printed JSON looks like:
 
 ## Per-device install
 
-For each machine, copy the binary, create the config, and lock down permissions.
+For each machine, build the binary, register it with your agent, then **let the server bootstrap its own config on first run**. There's no manual file creation step — when the server starts and its config file is missing, it writes a template at the OS-conventional location with a fresh `device.id`, then exits with a message telling you which two lines to edit.
 
-**Unix / macOS:**
-```bash
-mkdir -p ~/.config/shared-memory-mcp
-$EDITOR ~/.config/shared-memory-mcp/config.json     # paste setup output
-chmod 600 ~/.config/shared-memory-mcp/config.json
-```
+The OS-conventional locations are:
+- Unix: `~/.config/shared-memory-mcp/config.json`
+- Windows: `%APPDATA%\shared-memory-mcp\config.json`
+- Override the directory with `SHARED_MEMORY_MCP_CONFIG_DIR`.
 
-**Windows (PowerShell):**
-```powershell
-New-Item -ItemType Directory -Force "$env:APPDATA\shared-memory-mcp" | Out-Null
-notepad "$env:APPDATA\shared-memory-mcp\config.json"
-icacls "$env:APPDATA\shared-memory-mcp\config.json" /inheritance:r /grant:r "${env:USERNAME}:F"
-```
+The flow on a new device:
 
-The server **refuses to start** if the config file is group/world-readable on Unix, or owned by another user on Windows.
+1. Register the MCP with Claude Code (see next section).
+2. Open a Claude Code session — the MCP will fail to connect on first try; check its stderr/logs and you'll see something like:
+   ```
+   first run: wrote template config to C:\Users\<you>\AppData\Roaming\shared-memory-mcp\config.json.
+     1. Run `shared-memory-mcp-admin init` (against your Supabase superuser URL) to get a scoped connection string.
+     2. Open ...config.json and replace db.connectionString with the value from step 1.
+     3. Restart this MCP session.
+   ```
+3. Follow those three steps. On Unix also: `chmod 600 ~/.config/shared-memory-mcp/config.json`. On Windows also: `icacls "%APPDATA%\shared-memory-mcp\config.json" /inheritance:r /grant:r "%USERNAME%:F"`.
+4. Reload the MCP (`/mcp` in Claude Code or restart the session).
 
-Generate a unique `device.id` per device — the setup output already includes one, but if you create the config manually:
-```bash
-# Unix
-uuidgen
-# Windows PowerShell
-[guid]::NewGuid().ToString()
-```
+The server refuses to start if the config file is group/world-readable (Unix) or owned by another user (Windows).
 
 ## Register with your agent
 
@@ -145,11 +141,9 @@ The chosen slug + source is logged to stderr at startup.
 - True local-only mode is supported (omit `db.connectionString`) — useful for development, but those writes never propagate to other devices until you reconnect.
 
 **Where the cache lives:**
-- **Portable mode** (default if `config.json` lives at the repo root, next to `bin/`): `<repo>/data/local.db`. Everything stays self-contained — copy the repo folder to another device and you've moved the install.
-- Otherwise (legacy / OS-conventional layout):
-  - Unix: `~/.local/share/shared-memory-mcp/local.db`
-  - Windows: `%LOCALAPPDATA%\shared-memory-mcp\local.db`
-- Override either with `sync.localDbPath` in config (absolute or relative to the config file), or `SHARED_MEMORY_LOCAL_DB` env.
+- Unix: `~/.local/share/shared-memory-mcp/local.db`
+- Windows: `%LOCALAPPDATA%\shared-memory-mcp\local.db`
+- Override via `sync.localDbPath` in config, or `SHARED_MEMORY_LOCAL_DB` env.
 
 You can safely delete `local.db` at any time. The next startup will bootstrap-pull from Postgres.
 

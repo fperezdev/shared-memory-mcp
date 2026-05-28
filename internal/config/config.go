@@ -2,14 +2,16 @@
 //
 // Resolution order for the config file path:
 //
-//  1. Portable mode: <repo>/config.json (where the binary lives at
-//     <repo>/bin/...). Triggered by the file's presence. The repo dir
-//     is also used as the root for relative paths like caCertPath.
-//  2. SHARED_MEMORY_MCP_CONFIG_DIR env var.
-//  3. ~/.config/shared-memory-mcp/config.json (Unix) or
+//  1. SHARED_MEMORY_MCP_CONFIG_DIR env var.
+//  2. ~/.config/shared-memory-mcp/config.json (Unix) or
 //     %APPDATA%\shared-memory-mcp\config.json (Windows).
 //
 // Individual fields can be overridden by env vars (see envOverride).
+//
+// On first run (file missing), Load writes a template config with a
+// fresh device.id and a placeholder connection string, then returns
+// ErrNotConfigured so the server can exit with a clear "go edit this
+// file" message.
 //
 // The file holds the runtime credentials (scoped Postgres role connection
 // string + a per-device id) so we treat it as sensitive: if it's group-
@@ -19,6 +21,7 @@ package config
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -28,6 +31,10 @@ import (
 	"strconv"
 	"strings"
 )
+
+// cryptoRandRead is split out so the platform-conditional fallback in
+// newDeviceID stays readable.
+func cryptoRandRead(b []byte) (int, error) { return cryptorand.Read(b) }
 
 // utf8BOM is what Notepad and Windows PowerShell 5.1 prepend to "UTF-8"
 // files. encoding/json doesn't strip it; we do.
@@ -60,39 +67,9 @@ type SyncConfig struct {
 	LocalDBPath     string `json:"localDbPath"`
 }
 
-// portableRoot returns the repo root if the binary is running from a
-// "portable" install — a layout like:
-//
-//	<root>/bin/shared-memory-mcp.exe
-//	<root>/config.json          ← presence of this file triggers portable mode
-//	<root>/data/local.db        ← cache lives here in portable mode
-//
-// Returns ("", false) if portable mode isn't active. Portable beats
-// SHARED_MEMORY_MCP_CONFIG_DIR and OS defaults so a self-contained
-// install just works.
-func portableRoot() (string, bool) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", false
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
-	root := filepath.Dir(filepath.Dir(exe)) // parent of bin/
-	if st, err := os.Stat(filepath.Join(root, "config.json")); err == nil && !st.IsDir() {
-		return root, true
-	}
-	return "", false
-}
-
-// Paths returns the resolved config directory and file path. Precedence:
-//  1. Portable mode (config.json next to the repo root)
-//  2. SHARED_MEMORY_MCP_CONFIG_DIR env var
-//  3. OS conventional location (%APPDATA% on Windows, ~/.config on Unix)
+// Paths returns the resolved config directory and file path for this OS,
+// honoring SHARED_MEMORY_MCP_CONFIG_DIR if set.
 func Paths() (dir, file string) {
-	if root, ok := portableRoot(); ok {
-		return root, filepath.Join(root, "config.json")
-	}
 	if override := os.Getenv("SHARED_MEMORY_MCP_CONFIG_DIR"); override != "" {
 		return override, filepath.Join(override, "config.json")
 	}
@@ -110,12 +87,8 @@ func Paths() (dir, file string) {
 	return dir, filepath.Join(dir, "config.json")
 }
 
-// DefaultLocalDBPath returns the default SQLite cache location. In
-// portable mode that's <repo>/data/local.db; otherwise the OS convention.
+// DefaultLocalDBPath returns the default SQLite cache location for this OS.
 func DefaultLocalDBPath() string {
-	if root, ok := portableRoot(); ok {
-		return filepath.Join(root, "data", "local.db")
-	}
 	if runtime.GOOS == "windows" {
 		root := os.Getenv("LOCALAPPDATA")
 		if root == "" {
@@ -130,42 +103,108 @@ func DefaultLocalDBPath() string {
 
 // Load reads the config file, validates perms, applies env overrides,
 // and validates required fields.
+// ConnectionPlaceholder is the literal string written into a freshly
+// bootstrapped config.json for db.connectionString. Load treats any
+// value equal to this as "not yet configured".
+const ConnectionPlaceholder = "REPLACE_WITH_OUTPUT_FROM_shared-memory-mcp-admin_init"
+
+// ErrNotConfigured is returned by Load on first run, after a template
+// config file has been written to disk. Callers should print its
+// message and exit cleanly so the user knows what to do next.
+type ErrNotConfigured struct {
+	Path     string
+	Bootstrap bool // true when we just wrote the template ourselves
+}
+
+func (e *ErrNotConfigured) Error() string {
+	if e.Bootstrap {
+		return fmt.Sprintf(
+			"first run: wrote template config to %s.\n"+
+				"  1. Run `shared-memory-mcp-admin init` (against your Supabase superuser URL) to get a scoped connection string.\n"+
+				"  2. Open %s and replace db.connectionString with the value from step 1.\n"+
+				"  3. Restart this MCP session.\n"+
+				"  On Unix also: chmod 600 %s\n"+
+				"  On Windows also: icacls \"%s\" /inheritance:r /grant:r \"%%USERNAME%%:F\"",
+			e.Path, e.Path, e.Path, e.Path)
+	}
+	return fmt.Sprintf(
+		"config at %s still has the placeholder db.connectionString. Fill it in (see `shared-memory-mcp-admin init`) and restart.",
+		e.Path)
+}
+
 func Load() (*Config, error) {
-	dir, path := Paths()
+	_, path := Paths()
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if werr := writeTemplate(path); werr != nil {
+			return nil, fmt.Errorf("bootstrap config: %w", werr)
+		}
+		return nil, &ErrNotConfigured{Path: path, Bootstrap: true}
+	}
 
 	c := &Config{}
-	if data, err := os.ReadFile(path); err == nil {
-		if err := assertSecurePerms(path); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(bytes.TrimPrefix(data, utf8BOM), c); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", path, err)
-		}
-	} else if !os.IsNotExist(err) {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if err := assertSecurePerms(path); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(bytes.TrimPrefix(data, utf8BOM), c); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
 	envOverride(c)
 	applyDefaults(c)
-	resolveRelativePaths(c, dir)
 
 	if c.Device.ID == "" {
-		return nil, fmt.Errorf("missing device.id (set in %s or via SHARED_MEMORY_DEVICE_ID); generate one with `uuidgen` on Unix or `[guid]::NewGuid()` in PowerShell", path)
+		return nil, fmt.Errorf("missing device.id in %s. Delete the file and restart to regenerate, or set SHARED_MEMORY_DEVICE_ID", path)
 	}
-	// db.connectionString is optional: empty means local-only mode.
+	if c.DB.ConnectionString == ConnectionPlaceholder {
+		return nil, &ErrNotConfigured{Path: path, Bootstrap: false}
+	}
+	// db.connectionString being empty is acceptable: local-only mode.
 	return c, nil
 }
 
-// resolveRelativePaths interprets non-absolute path fields against the
-// config file's directory. Lets a portable install ship a config that
-// references "./certs/foo.pem" without baking in absolute paths.
-func resolveRelativePaths(c *Config, configDir string) {
-	if c.DB.CACertPath != "" && !filepath.IsAbs(c.DB.CACertPath) {
-		c.DB.CACertPath = filepath.Join(configDir, c.DB.CACertPath)
+// writeTemplate creates the config directory and writes a starter
+// config.json with a fresh device.id and a placeholder connection
+// string. File is created with 0600 mode (effective on Unix; on Windows
+// inheriting parent ACL is typically sufficient).
+func writeTemplate(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
-	if c.Sync.LocalDBPath != "" && !filepath.IsAbs(c.Sync.LocalDBPath) {
-		c.Sync.LocalDBPath = filepath.Join(configDir, c.Sync.LocalDBPath)
+	tpl := Config{
+		DB: DBConfig{
+			ConnectionString: ConnectionPlaceholder,
+			CACertPath:       "",
+		},
+		Device:  DeviceConfig{ID: newDeviceID()},
+		Project: ProjectConfig{},
+		Sync:    SyncConfig{IntervalSeconds: 60, PageSize: 1000},
 	}
+	body, err := json.MarshalIndent(tpl, "", "  ")
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	return os.WriteFile(path, body, 0o600)
+}
+
+func newDeviceID() string {
+	var b [16]byte
+	if _, err := cryptoRandRead(b[:]); err != nil {
+		// Fallback: time-based string; not ideal but a non-empty id is
+		// better than crashing, and the user can change it manually.
+		return fmt.Sprintf("device-%d", os.Getpid())
+	}
+	// Format as RFC 4122 v4 UUID.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func envOverride(c *Config) {
