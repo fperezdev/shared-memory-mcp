@@ -10,7 +10,8 @@ config.local.json
 .env
 .env.local
 
-# Local-only cache (per-device, not for source control)
+# Portable-mode runtime state (per-device, not for source control)
+data/
 local.db
 local.db-wal
 local.db-shm

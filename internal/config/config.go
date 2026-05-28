@@ -1,17 +1,20 @@
 // Package config loads and validates the per-device configuration.
 //
-// The config lives at:
+// Resolution order for the config file path:
 //
-//	~/.config/shared-memory-mcp/config.json    (Unix)
-//	%APPDATA%\shared-memory-mcp\config.json    (Windows)
+//  1. Portable mode: <repo>/config.json (where the binary lives at
+//     <repo>/bin/...). Triggered by the file's presence. The repo dir
+//     is also used as the root for relative paths like caCertPath.
+//  2. SHARED_MEMORY_MCP_CONFIG_DIR env var.
+//  3. ~/.config/shared-memory-mcp/config.json (Unix) or
+//     %APPDATA%\shared-memory-mcp\config.json (Windows).
 //
-// Override the directory with SHARED_MEMORY_MCP_CONFIG_DIR. Individual
-// fields can be overridden by env vars (see envOverride below).
+// Individual fields can be overridden by env vars (see envOverride).
 //
 // The file holds the runtime credentials (scoped Postgres role connection
-// string + a per-device id) so we treat it as sensitive: if it's group- or
-// world-readable on Unix, or owned by another user on Windows, we refuse
-// to start.
+// string + a per-device id) so we treat it as sensitive: if it's group-
+// or world-readable on Unix, or owned by another user on Windows, we
+// refuse to start.
 package config
 
 import (
@@ -57,9 +60,39 @@ type SyncConfig struct {
 	LocalDBPath     string `json:"localDbPath"`
 }
 
-// Paths returns the resolved config directory and file path for this OS,
-// honoring SHARED_MEMORY_MCP_CONFIG_DIR if set.
+// portableRoot returns the repo root if the binary is running from a
+// "portable" install — a layout like:
+//
+//	<root>/bin/shared-memory-mcp.exe
+//	<root>/config.json          ← presence of this file triggers portable mode
+//	<root>/data/local.db        ← cache lives here in portable mode
+//
+// Returns ("", false) if portable mode isn't active. Portable beats
+// SHARED_MEMORY_MCP_CONFIG_DIR and OS defaults so a self-contained
+// install just works.
+func portableRoot() (string, bool) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	root := filepath.Dir(filepath.Dir(exe)) // parent of bin/
+	if st, err := os.Stat(filepath.Join(root, "config.json")); err == nil && !st.IsDir() {
+		return root, true
+	}
+	return "", false
+}
+
+// Paths returns the resolved config directory and file path. Precedence:
+//  1. Portable mode (config.json next to the repo root)
+//  2. SHARED_MEMORY_MCP_CONFIG_DIR env var
+//  3. OS conventional location (%APPDATA% on Windows, ~/.config on Unix)
 func Paths() (dir, file string) {
+	if root, ok := portableRoot(); ok {
+		return root, filepath.Join(root, "config.json")
+	}
 	if override := os.Getenv("SHARED_MEMORY_MCP_CONFIG_DIR"); override != "" {
 		return override, filepath.Join(override, "config.json")
 	}
@@ -77,8 +110,12 @@ func Paths() (dir, file string) {
 	return dir, filepath.Join(dir, "config.json")
 }
 
-// DefaultLocalDBPath returns the default SQLite cache location for this OS.
+// DefaultLocalDBPath returns the default SQLite cache location. In
+// portable mode that's <repo>/data/local.db; otherwise the OS convention.
 func DefaultLocalDBPath() string {
+	if root, ok := portableRoot(); ok {
+		return filepath.Join(root, "data", "local.db")
+	}
 	if runtime.GOOS == "windows" {
 		root := os.Getenv("LOCALAPPDATA")
 		if root == "" {
@@ -94,7 +131,7 @@ func DefaultLocalDBPath() string {
 // Load reads the config file, validates perms, applies env overrides,
 // and validates required fields.
 func Load() (*Config, error) {
-	_, path := Paths()
+	dir, path := Paths()
 
 	c := &Config{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -110,12 +147,25 @@ func Load() (*Config, error) {
 
 	envOverride(c)
 	applyDefaults(c)
+	resolveRelativePaths(c, dir)
 
 	if c.Device.ID == "" {
 		return nil, fmt.Errorf("missing device.id (set in %s or via SHARED_MEMORY_DEVICE_ID); generate one with `uuidgen` on Unix or `[guid]::NewGuid()` in PowerShell", path)
 	}
 	// db.connectionString is optional: empty means local-only mode.
 	return c, nil
+}
+
+// resolveRelativePaths interprets non-absolute path fields against the
+// config file's directory. Lets a portable install ship a config that
+// references "./certs/foo.pem" without baking in absolute paths.
+func resolveRelativePaths(c *Config, configDir string) {
+	if c.DB.CACertPath != "" && !filepath.IsAbs(c.DB.CACertPath) {
+		c.DB.CACertPath = filepath.Join(configDir, c.DB.CACertPath)
+	}
+	if c.Sync.LocalDBPath != "" && !filepath.IsAbs(c.Sync.LocalDBPath) {
+		c.Sync.LocalDBPath = filepath.Join(configDir, c.Sync.LocalDBPath)
+	}
 }
 
 func envOverride(c *Config) {

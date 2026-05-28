@@ -145,9 +145,11 @@ The chosen slug + source is logged to stderr at startup.
 - True local-only mode is supported (omit `db.connectionString`) — useful for development, but those writes never propagate to other devices until you reconnect.
 
 **Where the cache lives:**
-- Unix: `~/.local/share/shared-memory-mcp/local.db`
-- Windows: `%LOCALAPPDATA%\shared-memory-mcp\local.db`
-- Override via `sync.localDbPath` in config, or `SHARED_MEMORY_LOCAL_DB` env.
+- **Portable mode** (default if `config.json` lives at the repo root, next to `bin/`): `<repo>/data/local.db`. Everything stays self-contained — copy the repo folder to another device and you've moved the install.
+- Otherwise (legacy / OS-conventional layout):
+  - Unix: `~/.local/share/shared-memory-mcp/local.db`
+  - Windows: `%LOCALAPPDATA%\shared-memory-mcp\local.db`
+- Override either with `sync.localDbPath` in config (absolute or relative to the config file), or `SHARED_MEMORY_LOCAL_DB` env.
 
 You can safely delete `local.db` at any time. The next startup will bootstrap-pull from Postgres.
 
