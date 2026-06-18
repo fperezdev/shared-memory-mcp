@@ -167,6 +167,9 @@ func handleAddObservations(ctx context.Context, c *Ctx, req mcp.CallToolRequest)
 	if err := req.BindArguments(&args); err != nil {
 		return nil, err
 	}
+	if len(args.Items) == 0 {
+		return nil, fmt.Errorf("items is required and must be non-empty (got %d items). Raw arguments may help: check the request payload.", len(args.Items))
+	}
 	type added struct {
 		EntityName string `json:"entityName"`
 		Count      int    `json:"count"`
@@ -240,6 +243,9 @@ func handleAddRelations(ctx context.Context, c *Ctx, req mcp.CallToolRequest) (*
 	if err := req.BindArguments(&args); err != nil {
 		return nil, err
 	}
+	if len(args.Relations) == 0 {
+		return nil, fmt.Errorf("relations is required and must be non-empty")
+	}
 	added := 0
 	for _, r := range args.Relations {
 		if r.From == "" || r.To == "" || r.RelationType == "" {
@@ -278,6 +284,9 @@ func handleDeleteEntities(ctx context.Context, c *Ctx, req mcp.CallToolRequest) 
 	}
 	if err := req.BindArguments(&args); err != nil {
 		return nil, err
+	}
+	if len(args.Names) == 0 {
+		return nil, fmt.Errorf("names is required and must be non-empty")
 	}
 	deleted := 0
 	for _, name := range args.Names {
@@ -320,6 +329,9 @@ func handleDeleteObservations(ctx context.Context, c *Ctx, req mcp.CallToolReque
 	}
 	if err := req.BindArguments(&args); err != nil {
 		return nil, err
+	}
+	if len(args.Items) == 0 {
+		return nil, fmt.Errorf("items is required and must be non-empty")
 	}
 	type res struct {
 		EntityName string `json:"entityName"`
@@ -410,6 +422,9 @@ func handleDeleteRelations(ctx context.Context, c *Ctx, req mcp.CallToolRequest)
 	}
 	if err := req.BindArguments(&args); err != nil {
 		return nil, err
+	}
+	if len(args.Relations) == 0 {
+		return nil, fmt.Errorf("relations is required and must be non-empty")
 	}
 	deleted := 0
 	for _, r := range args.Relations {
